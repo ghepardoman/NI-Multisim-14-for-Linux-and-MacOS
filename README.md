@@ -65,7 +65,7 @@ If Wine *suddenly disappears*, `brew remove` it and install it again.
 curl -fsSL https://raw.githubusercontent.com/ghepardoman/NI-Multisim-14-for-Linux-and-MacOS/main/install.sh -o install.sh && bash install.sh
 ```
 
-Or,
+or more explicitly
 
 ```bash
 # 1. Download the script
@@ -86,7 +86,7 @@ chmod +x install.sh
 curl -fsSL https://raw.githubusercontent.com/ghepardoman/NI-Multisim-14-for-Linux-and-MacOS/main/uninstall.sh -o uninstall.sh && bash uninstall.sh
 ```
 
-Or more explicitly,
+or
 
 ```bash
 # 1. Download the script
