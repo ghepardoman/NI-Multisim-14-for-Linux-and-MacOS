@@ -15,7 +15,7 @@
 #   - Wine, winetricks, cabextract, wget and git must already be installed.
 
 set -e # Exit on errors
-exec </dev/tty
+
 
 echo "============================================================================================"
 echo "   'NI Multisim 14.3 for Linux'  Copyright (C)  2026  Giovanni De Rosa, Lorenzo Pappalardo"
