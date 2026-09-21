@@ -1,0 +1,182 @@
+#!/bin/bash
+# Automated Multisim 14.3 uninstaller (Wine) - Arch Linux build
+# Authors: Giovanni De Rosa, Lorenzo Pappalardo
+# Description: Removes the Multisim 14.3 Wine prefix and all associated
+#              log files installed by the companion install script.
+#
+# This is the Arch-only variant, packaged for the AUR. It drops the
+# macOS /Applications shortcut cleanup from the upstream uninstall.sh,
+# since it doesn't apply on Linux.
+#
+# What this removes:
+#   - The dedicated Wine prefix ($HOME/.multisim143 by default)
+#   - Install/uninstall log files under /tmp
+#
+# Upstream: https://github.com/ghepardoman/NI-Multisim-14-for-Linux-and-MacOS
+
+set -e
+
+echo "============================================================================================"
+echo "   'NI Multisim 14.3 for Linux'  Copyright (C)  2026  Giovanni De Rosa, Lorenzo Pappalardo"
+echo "   This program comes with ABSOLUTELY NO WARRANTY; for details type 'show w'."
+echo "   This is free software, and you are welcome to redistribute it"
+echo "   under certain conditions; type 'show c' for details."
+echo "============================================================================================"
+echo
+
+while true; do
+  read -p "Do you wish to see the warranty or the license details [w/c; press Enter to skip]: " GPL_choice
+
+  if [[ -z "$GPL_choice" ]]; then
+    break
+
+  elif [[ "$GPL_choice" =~ ^[Ww]$ ]]; then
+    echo "THERE IS NO WARRANTY FOR THE PROGRAM, TO THE EXTENT PERMITTED BY"
+    echo "APPLICABLE LAW.  EXCEPT WHEN OTHERWISE STATED IN WRITING THE COPYRIGHT"
+    echo "HOLDERS AND/OR OTHER PARTIES PROVIDE THE PROGRAM 'AS IS' WITHOUT WARRANTY"
+    echo "OF ANY KIND, EITHER EXPRESSED OR IMPLIED, INCLUDING, BUT NOT LIMITED TO,"
+    echo "THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR"
+    echo "PURPOSE.  THE ENTIRE RISK AS TO THE QUALITY AND PERFORMANCE OF THE PROGRAM"
+    echo "IS WITH YOU.  SHOULD THE PROGRAM PROVE DEFECTIVE, YOU ASSUME THE COST OF"
+    echo "ALL NECESSARY SERVICING, REPAIR OR CORRECTION."
+    echo
+    echo
+
+  elif [[ "$GPL_choice" =~ ^[Cc]$ ]]; then
+    echo "This program is free software: you can redistribute it and/or modify"
+    echo "it under the terms of the GNU General Public License as published by"
+    echo "the Free Software Foundation, either version 3 of the License, or"
+    echo "(at your option) any later version."
+    echo
+    echo
+    echo "You must provide source code and preserve this license when conveying"
+    echo "modified or unmodified versions."
+    echo
+    echo
+
+  else
+    echo "Invalid input. Press Enter with no input to skip."
+    echo
+    echo
+  fi
+done
+
+echo "=============================="
+echo "  Multisim 14.3 Uninstaller (Arch)"
+echo "=============================="
+echo
+
+# ──────────────────────────────────────────────
+# CONFIG
+# ──────────────────────────────────────────────
+export WINEPREFIX="${WINEPREFIX:-$HOME/.multisim143}"
+
+LOGFILE="/tmp/multisim143-uninstall-full.log"
+: >"$LOGFILE"
+
+step() {
+  echo "==> $*"
+}
+
+# ──────────────────────────────────────────────
+# PREREQUISITES
+# ──────────────────────────────────────────────
+check_prerequisites() {
+  local missing=()
+  for cmd in wine wineserver; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+  done
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "❌ Missing required tools: ${missing[*]}"
+    echo "   These are needed to cleanly shut down any running Wine processes."
+    echo "   Install them with: sudo pacman -S --needed ${missing[*]}"
+    echo "   then re-run this script."
+    exit 1
+  fi
+
+  echo "✅ wine and wineserver are available."
+  echo
+}
+
+check_prerequisites
+
+# ──────────────────────────────────────────────
+# SANITY CHECK — does the prefix even exist?
+# ──────────────────────────────────────────────
+if [ ! -d "$WINEPREFIX" ]; then
+  echo "⚠️  Wine prefix not found at: $WINEPREFIX"
+  echo "   Nothing to remove. Exiting."
+  exit 0
+fi
+
+# ──────────────────────────────────────────────
+# CONFIRMATION
+# ──────────────────────────────────────────────
+echo "This will permanently remove:"
+echo "  • Wine prefix : $WINEPREFIX"
+echo "  • Log files   : /tmp/multisim143-*.log"
+echo
+read -rp "Are you sure you want to uninstall Multisim 14.3? [y/N]: " confirm
+
+case "$confirm" in
+  [Yy] | [Yy][Ee][Ss]) ;;
+  *)
+    echo "Uninstall cancelled."
+    exit 0
+    ;;
+esac
+echo
+
+# ──────────────────────────────────────────────
+# STOP WINE PROCESSES
+# ──────────────────────────────────────────────
+step "Stopping any running Wine processes for this prefix"
+WINEPREFIX="$WINEPREFIX" wineserver -k >>"$LOGFILE" 2>&1 || true
+sleep 2
+echo
+
+# ──────────────────────────────────────────────
+# REMOVE THE WINE PREFIX
+# ──────────────────────────────────────────────
+step "Removing Wine prefix at $WINEPREFIX"
+rm -rf "$WINEPREFIX"
+
+if [ ! -d "$WINEPREFIX" ]; then
+  echo "✅ Wine prefix removed."
+else
+  echo "❌ Failed to remove $WINEPREFIX — please delete it manually."
+fi
+echo
+
+# ──────────────────────────────────────────────
+# CLEAN UP LOG FILES
+# ──────────────────────────────────────────────
+step "Removing Multisim log files from /tmp"
+rm -f /tmp/multisim143-install-full.log \
+       /tmp/multisim143-install.log \
+       /tmp/multisim143-uninstall-full.log
+echo "✅ Log files removed."
+echo
+
+# ──────────────────────────────────────────────
+# DONE
+# ──────────────────────────────────────────────
+echo "======================================="
+echo "✅ Multisim 14.3 uninstall complete."
+echo "   A reboot is recommended to clear any"
+echo "   remaining Wine state from memory."
+echo "======================================="
+echo
+
+read -rp "Do you want to restart the machine now? [y/N]: " answer
+
+case "$answer" in
+  [Yy] | [Yy][Ee][Ss])
+    echo "Restarting system..."
+    sudo reboot
+    ;;
+  *)
+    echo "Restart skipped. You can reboot later manually."
+    ;;
+esac

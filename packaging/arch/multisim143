@@ -1,0 +1,79 @@
+#!/bin/bash
+# multisim143 - single entry point for the NI Multisim 14.3 desktop icon.
+#
+# First run (no Wine prefix yet): opens a terminal and runs the interactive
+# installer there, then launches Multisim once it finishes.
+# Subsequent runs: launches Multisim directly, no terminal involved.
+
+set -e
+
+export WINEPREFIX="${WINEPREFIX:-$HOME/.multisim143}"
+export WINEDEBUG="${WINEDEBUG:--all}"
+
+find_multisim_exe() {
+  find "$WINEPREFIX/drive_c/Program Files" "$WINEPREFIX/drive_c/Program Files (x86)" \
+    -maxdepth 5 -iname 'multisim.exe' -print -quit 2>/dev/null || true
+}
+
+launch_multisim() {
+  local exe="$1"
+  exec wine "$exe"
+}
+
+run_installer_in_terminal() {
+  # Try common terminal emulators in order. Whichever exists first wins.
+  # -e/-x conventions differ, so each is spelled out rather than guessed.
+  local terminals=(
+    "x-terminal-emulator -e multisim143-install"
+    "gnome-terminal -- multisim143-install"
+    "konsole -e multisim143-install"
+    "xfce4-terminal -e multisim143-install"
+    "alacritty -e multisim143-install"
+    "kitty multisim143-install"
+    "foot multisim143-install"
+    "xterm -e multisim143-install"
+  )
+
+  for entry in "${terminals[@]}"; do
+    local cmd="${entry%% *}"
+    if command -v "$cmd" &>/dev/null; then
+      # Run in the foreground and wait: we need the install to finish
+      # before deciding whether to launch Multisim afterwards.
+      $entry
+      return $?
+    fi
+  done
+
+  echo "No terminal emulator found. Install one (e.g. xterm), or run this" >&2
+  echo "yourself in a terminal you already have open:" >&2
+  echo "    multisim143-install" >&2
+  return 1
+}
+
+main() {
+  local exe
+  exe="$(find_multisim_exe)"
+
+  if [ -n "$exe" ]; then
+    launch_multisim "$exe"
+  fi
+
+  # Not installed yet - run the interactive installer in a terminal.
+  run_installer_in_terminal
+  local install_status=$?
+
+  if [ "$install_status" -ne 0 ]; then
+    exit "$install_status"
+  fi
+
+  exe="$(find_multisim_exe)"
+  if [ -z "$exe" ]; then
+    echo "Installer finished but multisim.exe still wasn't found." >&2
+    echo "Something in the install may have failed - check /tmp/multisim143-install-full.log" >&2
+    exit 1
+  fi
+
+  launch_multisim "$exe"
+}
+
+main "$@"
