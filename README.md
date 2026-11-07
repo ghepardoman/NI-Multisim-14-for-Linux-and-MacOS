@@ -6,7 +6,7 @@
 
 Built for the redpilled breed of engineers and students who rely on [NI Multisim](https://www.ni.com/en/support/downloads/software-products/download.multisim.html) every day but run Linux/MacOS as their primary OS. This repository provides the tools, tweaks, and compatibility setup needed to make Multisim usable on a daily-driver environment without the usual headaches.
 
-**Authors:** [Giovanni De Rosa](https://github.com/ghepardoman), [Lorenzo Pappalardo](https://github.com/Lobbo4), [Andrea Lestingi](https://github.com/AndreaLestingi)
+**Authors:** [Giovanni De Rosa](https://github.com/ghepardoman), [Lorenzo Pappalardo](https://github.com/Lobbo4)
 
 > ⚠️ Beware of unofficial copies of this project.
 ---
