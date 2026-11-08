@@ -7,10 +7,12 @@
 # the fallback keeps the classic DISPLAY path working unchanged.
 #
 # Priority:
-#   1. Wayland  -- WAYLAND_DISPLAY (or the default wayland-0) reachable
-#   2. X11      -- DISPLAY already set (Xorg session or XWayland)
-#   3. Embedded -- neither present: try the plain Wayland socket anyway and
-#                  let Wine report the real error
+#   1. X11      -- DISPLAY as-is (Xorg session or XWayland). The default:
+#                  winewayland.drv currently misrenders this app's GDI/MDI
+#                  surface (content smaller than the window frame, mouse
+#                  offset).
+#   2. Wayland  -- opt in via MULTISIM_FORCE_BACKEND=wayland (pure-Wayland
+#                  session without XWayland).
 #
 # Override: MULTISIM_FORCE_BACKEND=wayland|x11 picks one explicitly.
 
@@ -38,12 +40,11 @@ case "$force" in
     : "${DISPLAY:?MULTISIM_FORCE_BACKEND=x11 but DISPLAY is not set}"
     ;;
   "")
-    if want_wayland; then
-      export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-      unset DISPLAY
-    fi
-    # else: keep DISPLAY as-is (X11/XWayland session); with neither, wine
-    # reports its own actionable error.
+    # Default stays X11/XWayland: winewayland.drv currently misreports the
+    # client surface size for this app (GDI/BCGControlBar MDI) — the window
+    # frame is full-size but the rendered content is smaller and input
+    # coordinates drift (observed on KDE Plasma 1920x1080 scale=1). Keep
+    # DISPLAY as-is; wayland users can opt in with MULTISIM_FORCE_BACKEND=wayland.
     ;;
   *)
     echo "multisim143-launch: unknown MULTISIM_FORCE_BACKEND '$force'" >&2
