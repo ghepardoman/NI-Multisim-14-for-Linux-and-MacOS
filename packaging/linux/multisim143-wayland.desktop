@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=NI Multisim 14.3 (Wayland native)
+GenericName=Circuit Design Suite
+Comment=NI Multisim 14.3 via Wine -- composites straight onto your Wayland desktop
+Exec=multisim143-launch
+Type=Application
+StartupNotify=true
+Icon=6E43_multisim.0
+StartupWMClass=multisim.exe
+Categories=Development;Electronics;Education;Science;

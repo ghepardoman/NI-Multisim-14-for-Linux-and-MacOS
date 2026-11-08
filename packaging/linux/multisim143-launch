@@ -1,0 +1,59 @@
+#!/bin/sh
+# Multisim 14.3 desktop launcher -- Wayland native first, X11 fallback.
+#
+# Wine 11+ ships winewayland.drv: when a Wayland compositor socket is
+# reachable the windows composite straight onto the real desktop (no Xephyr,
+# no XWayland round trip). Some Wine builds / compositors still need X11, so
+# the fallback keeps the classic DISPLAY path working unchanged.
+#
+# Priority:
+#   1. Wayland  -- WAYLAND_DISPLAY (or the default wayland-0) reachable
+#   2. X11      -- DISPLAY already set (Xorg session or XWayland)
+#   3. Embedded -- neither present: try the plain Wayland socket anyway and
+#                  let Wine report the real error
+#
+# Override: MULTISIM_FORCE_BACKEND=wayland|x11 picks one explicitly.
+
+set -eu
+
+WINEPREFIX_DEFAULT="$HOME/.multisim143"
+export WINEPREFIX="${WINEPREFIX:-$WINEPREFIX_DEFAULT}"
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+
+force="${MULTISIM_FORCE_BACKEND:-}"
+
+want_wayland() {
+  [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+  [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && return 0
+  return 1
+}
+
+case "$force" in
+  wayland)
+    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+    unset DISPLAY
+    ;;
+  x11)
+    : "${DISPLAY:?MULTISIM_FORCE_BACKEND=x11 but DISPLAY is not set}"
+    ;;
+  "")
+    if want_wayland; then
+      export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+      unset DISPLAY
+    fi
+    # else: keep DISPLAY as-is (X11/XWayland session); with neither, wine
+    # reports its own actionable error.
+    ;;
+  *)
+    echo "multisim143-launch: unknown MULTISIM_FORCE_BACKEND '$force'" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  open -a Multisim
+  exit 0
+fi
+
+exec wine "C:\\users\\$USER\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\NI Multisim 14.3.lnk"
