@@ -75,6 +75,7 @@ export WINEPREFIX="${WINEPREFIX:-$HOME/.multisim143}"
 # Dedicated prefix (not the default ~/.wine) so this never touches/depends
 # on other Wine apps, and every run starts from known state.
 
+[[ "$(uname -s)" == "Darwin" ]] && [[ "$(uname -m)" == arm64* || "$(sysctl -in hw.optional.arm64 2>/dev/null)" == "1" ]] && IS_MACOS_ARM64=true || IS_MACOS_ARM64=false
 MIN_RECOMMENDED_WINE_VERSION="11.0"
 
 # All the noisy/verbose command output goes here instead of the terminal,
@@ -186,6 +187,18 @@ check_prerequisites
 #     WineHQ repo and install winehq-stable instead.
 #   - On everything else, just warn and point the user at winehq.org.
 check_wine_version() {
+  if $IS_MACOS_ARM64; then
+    local wine_bin wine_file_info
+    wine_bin="$(command -v wine)"
+    wine_file_info="$(file -b "$wine_bin" 2>/dev/null || true)"
+    if [[ "$wine_file_info" != *arm64* ]]; then
+      echo "❌ Apple Silicon (macOS arm64) detected, but Wine ($wine_bin) is not a native arm64 binary."
+      echo "   Detected binary type: ${wine_file_info:-unknown}"
+      echo "   A native arm64 Wine build with FEX-Emu and 4K page size support (e.g. MetalSharp-Wine) is required."
+      exit 1
+    fi
+  fi
+
   local raw major_minor smallest already_on_winehq=false
 
   raw="$(wine --version 2>/dev/null || true)"
@@ -297,7 +310,7 @@ echo
 # CREATE THE DEDICATED PREFIX
 # ──────────────────────────────────────────────
 step "Creating Wine prefix for Multisim at $WINEPREFIX"
-run wineboot
+WINEDLLOVERRIDES=mscoree=d run wineboot
 echo
 
 # ──────────────────────────────────────────────
@@ -309,14 +322,9 @@ echo "Working directory: $WORKDIR"
 echo
 
 # ──────────────────────────────────────────────
-# CHOOSE EDITION & DOWNLOAD THE OFFICIAL ONLINE INSTALLER
+# CHOOSE EDITION & DOWNLOAD THE OFFICIAL INSTALLER
 # ──────────────────────────────────────────────
-choose_edition() {
-  echo "Which Multisim 14.3 edition would you like to install?"
-  echo "  1) Educational"
-  echo "  2) Professional"
-  read -rp "Enter choice [1/2]: " edition_choice
-
+download_online_installer() {
   case "$edition_choice" in
   1)
     INSTALLER_URL="https://download.ni.com/support/nipkg/products/ni-c/ni-cds-educational/14.3/online/ni-cds-educational_14.3_online.exe"
@@ -325,10 +333,6 @@ choose_edition() {
   2)
     INSTALLER_URL="https://download.ni.com/support/nipkg/products/ni-c/ni-cds-professional/14.3/online/ni-cds-professional_14.3_online.exe"
     INSTALLER_FILE="ni-cds-professional_14.3_online.exe"
-    ;;
-  *)
-    echo "❌ Invalid choice."
-    exit 1
     ;;
   esac
 
@@ -339,17 +343,195 @@ choose_edition() {
   echo
 }
 
-choose_edition
+download_offline_installer() {
+  case "$edition_choice" in
+  1)
+    INSTALLER_URL="https://download.ni.com/support/nipkg/products/ni-c/ni-cds-educational/14.3/offline/ni-cds-educational_14.3.0_offline.iso"
+    INSTALLER_FILE="$HOME/ni-cds-educational_14.3.0_offline.iso"
+    ;;
+  2)
+    INSTALLER_URL="https://download.ni.com/support/nipkg/products/ni-c/ni-cds-professional/14.3/offline/ni-cds-professional_14.3.0_offline.iso"
+    INSTALLER_FILE="$HOME/ni-cds-professional_14.3.0_offline.iso"
+    ;;
+  esac
 
+  if [ -f "$INSTALLER_FILE" ]; then
+    step "Found existing ISO at $INSTALLER_FILE - skipping download"
+    echo
+    return
+  fi
+
+  step "Downloading $(basename "$INSTALLER_FILE") to $HOME from NI"
+  local wget_args=(-O "$INSTALLER_FILE" "$INSTALLER_URL")
+  $VERBOSE || wget_args=(-q "${wget_args[@]}")
+  run wget "${wget_args[@]}"
+  echo
+}
+
+choose_edition() {
+  echo "Which Multisim 14.3 edition would you like to install?"
+  echo "  1) Educational"
+  echo "  2) Professional"
+  read -rp "Enter choice [1/2]: " edition_choice
+
+  case "$edition_choice" in
+  1 | 2) ;;
+  *)
+    echo "❌ Invalid choice."
+    exit 1
+    ;;
+  esac
+
+  if $IS_MACOS_ARM64; then
+    download_offline_installer
+  else
+    download_online_installer
+  fi
+}
+
+choose_edition
+# ──────────────────────────────────────────────
 # ──────────────────────────────────────────────
 # WINE PREFIX SETUP
 # ──────────────────────────────────────────────
-step "Running winetricks (corefonts, dotnet48)"
-winetricks_args=(corefonts dotnet48)
-$VERBOSE || winetricks_args=(-q "${winetricks_args[@]}")
-run winetricks "${winetricks_args[@]}"
-echo
+run_winetricks() {
+  local args=("$@")
+  $VERBOSE || args=(-q "${args[@]}")
+  run winetricks "${args[@]}"
+}
 
+wine_prefix_setup() {
+  step "Running winetricks (corefonts, dotnet48)"
+  run_winetricks corefonts dotnet48
+  echo
+}
+
+# Office PIA: extract only the seven legacy assemblies directly into the GAC
+# without installing the MSI or running managed helper programs.
+pia_metadata() {
+  local name="$1" filename="$2" version="$3" token="$4" signature="$5" mvid="$6"
+  printf '%s\r\n' \
+    '[AssemblyInfo]' \
+    "Signature=$signature" \
+    "MVID=$mvid" \
+    "URL=file:///C:/windows/assembly/GAC/$name/${version}__${token}/$filename" \
+    "DisplayName=$name, Version=$version, Culture=neutral, PublicKeyToken=$token" ''
+}
+
+install_office_pia() {
+  local dir="$WORKDIR/office-pia"
+  local url='https://download.microsoft.com/download/C/1/D/C1D6DBBB-700D-4669-98CF-820AC3AE8E55/PIARedist.exe'
+  local msi_win
+  mkdir -p "$dir"
+  step "Downloading Office 2010 Primary Interop Assemblies"
+  run curl -fL --retry 3 -o "$dir/PIARedist.exe" "$url"
+  run cabextract -d "$dir" "$dir/PIARedist.exe"
+  msi_win=$(wine winepath -w "$dir/o2010pia.msi")
+
+  step "Extracting embedded PIA cabinet (no MSI installation)"
+  (cd "$dir" && WINEDEBUG=-all run wine msidb.exe -d "$msi_win" -x PIAREDIST.CAB)
+  step "Extracting and installing Office PIA assemblies into GAC"
+  install_pia_assembly "$dir" \
+    "ADODB" "adodb.dll" "FL_adodb_dll_____X86.3643236F_FC70_11D3_A536_0090278A1BB8" \
+    "7.0.3300.0" "b03f5f7f11d50a3a" \
+    "e2bceb4817b7301863f7b2bc6f88d3668bcc942f" "25aad7bf29a3084a9a0ecbcc74338efe"
+  install_pia_assembly "$dir" \
+    "MSDATASRC" "msdatasrc.dll" "FL_msdatasrc_dll_____X86.3643236F_FC70_11D3_A536_0090278A1BB8" \
+    "7.0.3300.0" "b03f5f7f11d50a3a" \
+    "95cc2f0a0474c30729367a2bb77c3df98f4df945" "d8efdf9edbb0e04aa81029fe4ab3888d"
+  install_pia_assembly "$dir" \
+    "stdole" "stdole.dll" "stdole_dll_4_____X86.3643236F_FC70_11D3_A536_0090278A1BB8" \
+    "7.0.3300.0" "b03f5f7f11d50a3a" \
+    "d149e67e8b05b32835fea81b94ec3b9c7202ab8d" "8151f01db1e8e5419e16182d6b591d92"
+
+  install_pia_assembly "$dir" \
+    "Microsoft.StdFormat" "Microsoft.stdformat.dll" "FL_Microsoft_stdformat_dll_____X86.3643236F_FC70_11D3_A536_0090278A1BB8" \
+    "7.0.3300.0" "b03f5f7f11d50a3a" \
+    "508f28dd10e9ceaeead832451b771eaa01a11fc7" "8e52eb1fc766e24d9a8d26e37a63720e"
+
+  install_pia_assembly "$dir" \
+    "Extensibility" "extensibility.dll" "FL_extensibility_dll_____X86.3643236F_FC70_11D3_A536_0090278A1BB8" \
+    "7.0.3300.0" "b03f5f7f11d50a3a" \
+    "1fa9f788ec95fd8289a27ce679cc27bd1229113c" "e074f5a6d750b647ac049250c35aac75"
+
+  install_pia_assembly "$dir" \
+    "Microsoft.mshtml" "Microsoft.mshtml.dll" "FL_Microsoft_mshtml_dll_____X86.3643236F_FC70_11D3_A536_0090278A1BB8" \
+    "7.0.3300.0" "b03f5f7f11d50a3a" \
+    "558f255b2490c3bffc4c7c363eb09ee951516fec" "3c45a4ac22776244af35d1385b23eb22"
+
+  install_pia_assembly "$dir" \
+    "mscomctl" "mscomctl.dll" "mscomctl.dll.D0DF3458_A845_11D3_8D0A_0050046416B9" \
+    "10.0.4504.0" "31bf3856ad364e35" \
+    "80135593cc73a56bf43f02998db4feaee9eef251" "75d44e7ae8a0ef40bf4540ddbb718f15"
+}
+install_pia_assembly() {
+  local dir="$1" name="$2" filename="$3" entry="$4" version="$5" token="$6" signature="$7" mvid="$8"
+  local target="$WINEPREFIX/drive_c/windows/assembly/GAC/$name/${version}__${token}"
+
+  mkdir -p "$target"
+  run cabextract -d "$target" -F "$entry" "$dir/PIAREDIST.CAB"
+  mv "$target/$entry" "$target/$filename"
+  pia_metadata "$name" "$filename" "$version" "$token" "$signature" "$mvid" > "$target/__AssemblyInfo__.ini"
+  $VERBOSE && echo "Installed: $target/$filename"
+}
+optimize_clr_stage() {
+  local clr="$1" framework ngen_bin
+  for framework in Framework64 Framework; do
+    ngen_bin="$WINEPREFIX/drive_c/windows/Microsoft.NET/$framework/$clr/ngen.exe"
+    if [[ -f "$ngen_bin" ]]; then
+      step "Running NGen for $framework/$clr"
+      run wine "$ngen_bin" executeQueuedItems || echo "Warning: NGen failed for $framework/$clr; continuing."
+    else
+      echo "Warning: NGen unavailable for $framework/$clr; skipping."
+    fi
+  done
+}
+
+install_netfx35() {
+  step "Running winetricks (dotnet35sp1)"
+  run_winetricks dotnet35sp1
+  optimize_clr_stage "v2.0.50727"
+  step "Stopping Wine"
+  run wineserver -k || true
+  run wineserver -w
+}
+
+wine_prefix_setup_fex() {
+  step "Running winetricks (corefonts, vcrun2005, vcrun2008, vcrun2010, msxml6, gdiplus, wsh57)"
+  run_winetricks corefonts vcrun2005 vcrun2008 vcrun2010 msxml6 gdiplus wsh57
+
+  mkdir -p "$WINEPREFIX"
+  grep -qxF "ucrtbase2019" "$WINEPREFIX/winetricks.log" 2>/dev/null || echo "ucrtbase2019" >> "$WINEPREFIX/winetricks.log"
+  
+  run wineserver -k || true
+  run wineserver -w
+
+  step "Running winetricks (vcrun2019)"
+  run_winetricks vcrun2019
+
+  install_office_pia
+  install_netfx35
+
+  step "Running winetricks (dotnet48)"
+  run_winetricks dotnet48
+
+  read -rp "Optimize .NET Framework 4.8 assemblies now (NGen)? [y/N]: " ngen_choice
+  if [[ "$ngen_choice" =~ ^[Yy]$ ]]; then
+    optimize_clr_stage "v4.0.30319"
+  else
+    step "Skipping NGen optimization for .NET Framework 4.8"
+  fi
+
+  step "Running winetricks (webview2)"
+  run_winetricks webview2
+  echo
+}
+
+if $IS_MACOS_ARM64; then
+  wine_prefix_setup_fex
+else
+  wine_prefix_setup
+fi
 set_winver_win10() {
   step "Setting Wine Windows version to 10"
   run wine winecfg -v win10
@@ -359,26 +541,374 @@ set_winver_win10() {
 set_winver_win10
 
 # ──────────────────────────────────────────────
-# RUN THE NI ONLINE INSTALLER
+# RUN THE NI INSTALLER
 # ──────────────────────────────────────────────
-# Run through cmd's "start /wait" rather than invoking the exe directly:
-# the installer's own "please reboot" prompt at the end otherwise leaves a
-# Wine process sitting around forever and the script never gets control back.
-step "Running the Multisim 14.3 online installer"
-if $VERBOSE; then
-  wine cmd /c "start /wait \"\" $INSTALLER_FILE" || true
+install_online() {
+  # Run through cmd's "start /wait" rather than invoking the exe directly:
+  # the installer's own "please reboot" prompt at the end otherwise leaves a
+  # Wine process sitting around forever and the script never gets control back.
+  step "Running the Multisim 14.3 online installer"
+  if $VERBOSE; then
+    wine cmd /c "start /wait \"\" $INSTALLER_FILE" || true
+  else
+    WINEDEBUG=-all wine cmd /c "start /wait \"\" $INSTALLER_FILE" >>"$LOGFILE" 2>&1 || true
+  fi
+
+  echo "Installer finished."
+  sleep 5
+
+  step "Stopping Wine"
+  wineserver -k || true
+  echo "Multisim installation stage complete."
+  echo
+}
+
+detect_disk_image_backend() {
+  local version major
+  version=$(sw_vers -productVersion) || return 1
+  major=${version%%.*}
+  if [[ ! "$major" =~ ^[0-9]+$ ]]; then
+    echo "Invalid macOS version: $version" >&2
+    return 1
+  fi
+  if (( major >= 27 )); then
+    DISK_IMAGE_BACKEND=diskutil
+  else
+    DISK_IMAGE_BACKEND=hdiutil
+  fi
+  step "macOS $version: disk image backend $DISK_IMAGE_BACKEND"
+}
+
+# Detach only the mount point obtained from our image attachment.
+detach_offline_iso() {
+  if [[ -z "${ISO_MOUNT:-}" ]]; then
+    return 0
+  fi
+  step "Unmounting ISO from $ISO_MOUNT"
+  if [[ "$DISK_IMAGE_BACKEND" == diskutil ]]; then
+    run diskutil eject "$ISO_MOUNT" || true
+  else
+    run hdiutil detach "$ISO_MOUNT" || true
+  fi
+  ISO_MOUNT=""
+}
+
+# diskutil attach returns a structured list of attached entities. It may
+# report an existing mount rather than the requested mount point.
+attach_diskutil_iso() {
+  local target="$1" plist="$WORKDIR/attach.plist" i=0 mount
+  if ! diskutil image attach --plist --readOnly --mountOptions nobrowse \
+      --mountPoint "$target" "$ISO_PATH" >"$plist" 2>>"$LOGFILE"; then
+    cat "$plist" >>"$LOGFILE"
+    echo "diskutil could not attach the ISO; inspect $LOGFILE." >&2
+    return 1
+  fi
+  cat "$plist" >>"$LOGFILE"
+  while /usr/libexec/PlistBuddy -c "Print :system-entities:$i" "$plist" >/dev/null 2>&1; do
+    mount=$(/usr/libexec/PlistBuddy -c "Print :system-entities:$i:mount-point" "$plist" 2>/dev/null) || mount=""
+    if [[ -n "$mount" && -d "$mount" ]]; then
+      ISO_MOUNT="$mount"
+      step "Mounted ISO: $ISO_MOUNT"
+      return 0
+    fi
+    i=$((i+1))
+  done
+  echo "diskutil returned no mounted entity; inspect $plist." >&2
+  return 1
+}
+
+# Read hdiutil's structured output, matching the actual image path rather
+# than guessing a volume name. PlistBuddy is shipped with macOS.
+find_iso_mount() {
+  local plist="$WORKDIR/images.plist" i=0 j image_path mount
+  hdiutil info -plist > "$plist" || return 2
+  while image_path=$(/usr/libexec/PlistBuddy -c "Print :images:$i:image-path" "$plist" 2>/dev/null); do
+    if [[ "$image_path" == "$ISO_PATH" || "$image_path" -ef "$ISO_PATH" ]]; then
+      j=0
+      while /usr/libexec/PlistBuddy -c "Print :images:$i:system-entities:$j" "$plist" >/dev/null 2>&1; do
+        mount=$(/usr/libexec/PlistBuddy -c "Print :images:$i:system-entities:$j:mount-point" "$plist" 2>/dev/null) || mount=""
+        if [[ -n "$mount" && -d "$mount" ]]; then
+          printf '%s\n' "$mount"
+          return 0
+        fi
+        j=$((j+1))
+      done
+    fi
+    i=$((i+1))
+  done
+  return 1
+}
+
+install_nipkg_vc2015() {
+  local nipkg_src="$ISO_MOUNT/pool/ni-msvcrt-2015_14.1.5.49152-0+f0_windows_all.nipkg"
+  local stage="$WORKDIR/ni-msvcrt-2015"
+  local msi msi_path msi_win
+
+  if [[ ! -f "$nipkg_src" ]]; then
+    echo "❌ Could not find $nipkg_src inside mounted ISO." >&2
+    return 1
+  fi
+
+  mkdir -p "$stage"
+  step "Extracting NI VC2015 runtime package (.nipkg)"
+  (cd "$stage" && run ar -x "$nipkg_src")
+  run tar -xzf "$stage/data.tar.gz" -C "$stage"
+
+  for msi in VC2015-32Wrapper.msi VC2015-64Wrapper.msi VC2015Core.msi; do
+    msi_path="$(find "$stage" -name "$msi" -print -quit)"
+    if [[ -z "$msi_path" ]]; then
+      echo "❌ Missing $msi inside extracted data.tar.gz." >&2
+      return 1
+    fi
+    msi_win="$(wine winepath -w "$msi_path")"
+    step "Installing $msi"
+    run wine msiexec /i "$msi_win" LicenseAccepted=1 /qf /norestart
+  done
+}
+
+start_ni_offline_monitor() {
+  local vbs_file="$WORKDIR/ni_monitor.vbs"
+  MONITOR_FLAG="$WORKDIR/ni_monitor.flag"
+  MONITOR_READY="${MONITOR_FLAG}.ready"
+  local result_file="$WORKDIR/ni_monitor.result"
+  local vbs_win flag_win result_win waited=0
+  cat <<'VBS' > "$vbs_file"
+Option Explicit
+
+Dim wmi, fso, flag, result, started, idleSince
+Dim seen, count, previous, proc, elapsed, lastBeat, out
+Dim niSeen, name, idle, niName, processes, queryError
+Dim previousNi, managerActive
+
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+flag = WScript.Arguments(0)
+result = WScript.Arguments(1)
+
+started = Now
+idleSince = Empty
+seen = False
+niSeen = False
+previous = -1
+previousNi = False
+lastBeat = Now
+
+Set out = fso.CreateTextFile(flag & ".ready", True)
+out.Close
+
+WScript.Echo Now & " [NI] Waiting for NIPackageManager.exe"
+
+Do While fso.FileExists(flag)
+
+    count = 0
+    niName = ""
+    idle = 0
+
+    On Error Resume Next
+    Err.Clear
+
+    Set processes = wmi.ExecQuery("SELECT Name FROM Win32_Process")
+
+    If Err.Number = 0 Then
+        For Each proc In processes
+            name = ""
+
+            If Not IsNull(proc.Name) Then name = LCase(proc.Name)
+
+            If name = "nipackagemanager.exe" Then niName = name
+            If name = "msiexec.exe" Then count = count + 1
+        Next
+    End If
+
+    queryError = Err.Number
+    On Error GoTo 0
+
+    elapsed = DateDiff("s", started, Now)
+
+    If queryError <> 0 Then
+
+        idleSince = Empty
+        WScript.Echo Now & " [NI] WMI error=" & queryError & "; idle reset"
+
+    Else
+
+        managerActive = (niName <> "")
+
+        If Not niSeen And managerActive Then
+            niSeen = True
+            WScript.Echo Now & " [NI] NI Package Manager detected: " & niName
+        End If
+
+        If niSeen And count > 0 Then seen = True
+
+        ' Track MSI inactivity in both scenarios.
+        If niSeen And count = 0 And (seen Or managerActive) Then
+            If IsEmpty(idleSince) Then idleSince = Now
+            idle = DateDiff("s", idleSince, Now)
+        Else
+            idleSince = Empty
+        End If
+
+        If count <> previous Or managerActive <> previousNi Or Not IsEmpty(idleSince) Or DateDiff("s", lastBeat, Now) >= 30 Then
+            WScript.Echo Now & " [NI] elapsed=" & elapsed & _
+                " NI=" & niSeen & _
+                " NIPMActive=" & managerActive & _
+                " MSISeen=" & seen & _
+                " MSI=" & count & _
+                " idle=" & idle & "/50"
+
+            previous = count
+            previousNi = managerActive
+            lastBeat = Now
+        End If
+
+        If niSeen And idle >= 50 Then
+
+            If seen Then
+
+                ' Normal installation scenario.
+                If managerActive Then
+                    WScript.Echo Now & " [NI] MSI idle threshold reached; NI Package Manager still active, waiting"
+                Else
+                    Set out = fso.CreateTextFile(result, True)
+                    out.WriteLine "idle"
+                    out.Close
+
+                    WScript.Echo Now & " [NI] MSI idle threshold reached"
+                    WScript.Quit 0
+                End If
+
+            ElseIf managerActive Then
+
+                ' No MSI processes were started.
+                Set out = fso.CreateTextFile(result, True)
+                out.WriteLine "idle"
+                out.Close
+
+                WScript.Echo Now & " [NI] NI Package Manager idle without MSI activity"
+                WScript.Quit 0
+
+            End If
+
+        End If
+
+    End If
+
+    If elapsed >= 10800 Then
+        WScript.Echo Now & " [NI] timeout"
+        WScript.Quit 6
+    End If
+
+    WScript.Sleep 10000
+
+Loop
+
+WScript.Echo Now & " [NI] cancelled by host"
+WScript.Quit 7
+VBS
+
+  : > "$MONITOR_FLAG"
+  rm -f "$MONITOR_READY" "$result_file"
+
+  vbs_win="$(wine winepath -w "$vbs_file")"
+  flag_win="$(wine winepath -w "$MONITOR_FLAG")"
+  result_win="$(wine winepath -w "$result_file")"
+
+  step "Starting NI Package Manager WMI monitor"
+  if $VERBOSE; then
+    wine cscript.exe //Nologo "$vbs_win" "$flag_win" "$result_win" &
+  else
+    WINEDEBUG=-all wine cscript.exe //Nologo "$vbs_win" "$flag_win" "$result_win" >>"$LOGFILE" 2>&1 &
+  fi
+  MONITOR_PID=$!
+
+  while [[ ! -f "$MONITOR_READY" ]]; do
+    if ! kill -0 "$MONITOR_PID" 2>/dev/null; then
+      echo "❌ WMI monitor exited unexpectedly before signaling ready." >&2
+      return 1
+    fi
+    if (( waited >= 60 )); then
+      rm -f "$MONITOR_FLAG"
+      echo "❌ Timed out waiting for WMI monitor readiness." >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+install_offline() {
+  ISO_PATH="$INSTALLER_FILE"
+  ISO_MOUNT=""
+  MONITOR_PID=""
+  MONITOR_FLAG=""
+  MONITOR_READY=""
+  local mounted_by_script=false
+
+  detect_disk_image_backend
+
+  if [[ "$DISK_IMAGE_BACKEND" == hdiutil ]]; then
+    if ISO_MOUNT="$(find_iso_mount)"; then
+      step "Found existing ISO mount at $ISO_MOUNT"
+    else
+      ISO_MOUNT="$WORKDIR/iso-mount"
+      mkdir -p "$ISO_MOUNT"
+      step "Mounting ISO with hdiutil at $ISO_MOUNT"
+      run hdiutil attach -readonly -nobrowse -mountpoint "$ISO_MOUNT" "$ISO_PATH"
+      mounted_by_script=true
+    fi
+  else
+    local target_mount="$WORKDIR/iso-mount"
+    mkdir -p "$target_mount"
+    attach_diskutil_iso "$target_mount"
+    mounted_by_script=true
+  fi
+
+  local rc=0
+  (
+    set -e
+    install_nipkg_vc2015
+    start_ni_offline_monitor
+
+    local installer_exe="$ISO_MOUNT/install.exe"
+    if [[ ! -f "$installer_exe" ]]; then
+      installer_exe="$(find "$ISO_MOUNT" -maxdepth 1 -iname 'install.exe' -print -quit)"
+    fi
+    if [[ -z "$installer_exe" || ! -f "$installer_exe" ]]; then
+      echo "❌ Could not find install.exe at the root of $ISO_MOUNT." >&2
+      exit 1
+    fi
+
+    step "Running the Multisim 14.3 offline installer (--quiet --accept-eulas --prevent-reboot)"
+    if $VERBOSE; then
+      wine "$installer_exe" --quiet --accept-eulas --prevent-reboot &
+    else
+      WINEDEBUG=-all wine "$installer_exe" --quiet --accept-eulas --prevent-reboot >>"$LOGFILE" 2>&1 &
+    fi
+
+    wait "$MONITOR_PID"
+    rm -f "$MONITOR_FLAG" "$MONITOR_READY"
+
+    step "Stopping Wine"
+    run wineserver -k || true
+    run wineserver -w
+    echo "Multisim offline installation stage complete."
+    echo
+  ) || rc=$?
+
+  rm -f "${MONITOR_FLAG:-}" "${MONITOR_READY:-}"
+  if $mounted_by_script; then
+    detach_offline_iso
+  fi
+
+  return "$rc"
+}
+
+if $IS_MACOS_ARM64; then
+  install_offline
 else
-  WINEDEBUG=-all wine cmd /c "start /wait \"\" $INSTALLER_FILE" >>"$LOGFILE" 2>&1 || true
+  install_online
 fi
-
-echo "Installer finished."
-sleep 5
-
-step "Stopping Wine"
-wineserver -k || true
-echo "Multisim installation stage complete."
-echo
-
 # ──────────────────────────────────────────────
 # DATABASE ENGINE: MDAC 2.7 + JET 4.0
 # (archived copies - Microsoft's original download links are dead)
@@ -410,13 +940,10 @@ install_database_engine() {
   mkdir -p "$WINEPREFIX/drive_c/windows/syswow64"
   mkdir -p "$WINEPREFIX/drive_c/Program Files/Common Files/Microsoft Shared/DAO"
 
-  cp dao360.dll "$WINEPREFIX/drive_c/windows/syswow64/"
-  cp msjet40.dll "$WINEPREFIX/drive_c/windows/syswow64/"
-  cp msrd3x40.dll "$WINEPREFIX/drive_c/windows/syswow64/"
+  cp dao360.dll msjet40.dll msrd3x40.dll "$WINEPREFIX/drive_c/windows/syswow64/"
 
   step "Registering DLLs"
-  run wine regsvr32 'C:\windows\syswow64\dao360.dll'
-  run wine regsvr32 'C:\windows\syswow64\msjet40.dll'
+  run wine regsvr32 'C:\windows\syswow64\dao360.dll' 'C:\windows\syswow64\msjet40.dll'
 
   popd >/dev/null
   rm -rf /tmp/jet40
@@ -468,6 +995,7 @@ install_macos_app() {
     echo "⚠️  Could not find a .app bundle inside multisim.app.zip - skipping."
   else
     rm -rf "/Applications/$(basename "$app_path")"
+	find "$app_path" -type f -name "run.sh" -exec chmod +x {} \;
     cp -R "$app_path" /Applications/
     echo "✅ Multisim shortcut installed to /Applications/$(basename "$app_path")."
   fi
